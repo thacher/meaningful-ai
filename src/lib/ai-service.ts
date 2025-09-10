@@ -1,0 +1,480 @@
+import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
+import { ProfileConfig, ChatMessage, UserProfile, AnalysisResult } from '@/types/profile';
+import { getProfileConfig, config } from './config';
+import { evaluationEngine } from './evaluation-engine';
+import { offlineLLMService } from './offline-llm-service';
+import lifeWisdom from '@/config/life-wisdom.json';
+
+class AIService {
+  private openai: OpenAI | null = null;
+  private anthropic: Anthropic | null = null;
+  private profileConfig: ProfileConfig;
+
+  constructor() {
+    // Only initialize clients on the server side
+    if (typeof window === 'undefined') {
+      // Check if API keys are valid (not placeholder values)
+      if (config.openai.apiKey && !config.openai.apiKey.includes('your_openai_api_key_here')) {
+        this.openai = new OpenAI({
+          apiKey: config.openai.apiKey,
+        });
+      }
+      if (config.anthropic.apiKey && !config.anthropic.apiKey.includes('your_anthropic_api_key_here')) {
+        this.anthropic = new Anthropic({
+          apiKey: config.anthropic.apiKey,
+        });
+      }
+    }
+    this.profileConfig = getProfileConfig();
+  }
+
+  private createSystemPrompt(userProfile?: UserProfile): string {
+    const { name, tone, values, communication_style, personality_traits, filters } = this.profileConfig;
+    const wisdom = lifeWisdom as Record<string, unknown>;
+    
+    return `You are ${name}, an AI representation with a carefully crafted personality and deep wisdom about life, relationships, and human connection. Here's your core identity:
+
+TONE & COMMUNICATION:
+- Communication style: ${communication_style}
+- Tone: ${tone.join(', ')}
+- Personality traits: ${personality_traits.join(', ')}
+
+CORE VALUES:
+${values.map(value => `- ${value}`).join('\n')}
+
+LIFE WISDOM & PHILOSOPHY:
+- Life Purpose: ${(wisdom.core_philosophy as Record<string, string>).life_purpose}
+- Human Nature: ${(wisdom.core_philosophy as Record<string, string>).human_nature}
+- Relationships: ${(wisdom.core_philosophy as Record<string, string>).relationships}
+- Growth Mindset: ${(wisdom.core_philosophy as Record<string, string>).growth_mindset}
+
+KEY LIFE LESSONS TO SHARE:
+${(wisdom.life_lessons as Array<{lesson: string; description: string}>).slice(0, 5).map((lesson) => `- ${lesson.lesson}: ${lesson.description}`).join('\n')}
+
+INTERACTION GUIDELINES:
+1. Ask ONE thoughtful question at a time - avoid overwhelming with multiple questions
+2. Listen actively and build on responses with genuine curiosity
+3. Share relevant insights or gentle challenges when appropriate
+4. Maintain warmth while being discerning about compatibility
+5. Look for both green flags (${filters.greenFlags.slice(0, 3).join(', ')}) and red flags (${filters.redFlags.slice(0, 3).join(', ')})
+6. Draw from your life wisdom to provide meaningful insights
+7. Focus on authentic connection and personal growth
+8. Keep responses concise and focused - quality over quantity
+9. Be conversational, not interrogative - make it feel natural
+10. Respond to what they say before asking your next question
+
+CONVERSATION FLOW:
+- Start with lighter topics to build rapport
+- Ask ONE focused question at a time - let them respond fully before moving on
+- Gradually introduce deeper questions about values and perspectives
+- Adapt your questioning based on their responses and engagement level
+- Be authentic - don't just interview, have a real conversation
+- Share wisdom naturally when it adds value to the conversation
+- Keep responses concise and conversational, not overwhelming
+- Acknowledge their response before asking the next question
+- Make it feel like talking to a thoughtful friend, not filling out a form
+
+BEHAVIORAL INSIGHT QUESTIONS TO USE:
+When appropriate, ask these questions to uncover deeper behavioral patterns and compatibility:
+${this.profileConfig.questions.compatibility_deep_dive.slice(0, 10).map((question: string) => `- ${question}`).join('\n')}
+
+Remember: You're representing someone who values genuine connection and has deep insights about life. Be warm but discerning, curious but boundaried, engaging but authentic. Use your wisdom to create meaningful conversations that help people explore their own growth and values.
+
+CRITICAL: Ask ONLY ONE question per response. Do not ask multiple questions or provide multiple options. Focus on one thoughtful question and wait for their response before moving to the next topic. Be conversational and acknowledge what they've shared before asking your next question. Make it feel natural, not like an interview.
+
+${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conversation_history.length} previous messages. Their current compatibility score is ${userProfile.evaluation.compatibility_score}/100.` : ''}`;
+  }
+
+  async generateResponse(
+    messages: ChatMessage[],
+    userProfile?: UserProfile,
+    aiModes?: { local: boolean; openai: boolean; anthropic: boolean }
+  ): Promise<{ response: string; analysis: AnalysisResult }> {
+    try {
+      if (!this.openai && !this.anthropic) {
+        throw new Error('Neither OpenAI nor Anthropic client initialized - this should only run on the server');
+      }
+
+      const systemPrompt = this.createSystemPrompt(userProfile);
+      
+      const openaiMessages = [
+        { role: 'system' as const, content: systemPrompt },
+        ...messages.map(msg => ({
+          role: msg.type === 'user' ? 'user' as const : 'assistant' as const,
+          content: msg.content,
+        })),
+      ];
+
+      let response: string;
+      
+      // Determine which AI services to use based on user preferences
+      const useLocal = aiModes?.local ?? true; // Default to local
+      const useOpenAI = aiModes?.openai ?? false;
+      const useAnthropic = aiModes?.anthropic ?? false;
+      
+      // If no AI services are enabled, default to local
+      if (!useLocal && !useOpenAI && !useAnthropic) {
+        console.log('No AI modes enabled, defaulting to local');
+        if (offlineLLMService.isOfflineAvailable()) {
+          return await offlineLLMService.generateResponse(messages, userProfile);
+        } else {
+          return this.generateTestModeResponse(messages, userProfile);
+        }
+      }
+      
+      // Try local first if enabled
+      if (useLocal && offlineLLMService.isOfflineAvailable()) {
+        try {
+          console.log('Using local AI (Ollama)');
+          return await offlineLLMService.generateResponse(messages, userProfile);
+        } catch (error) {
+          console.log('Local AI failed, trying other services:', error);
+        }
+      }
+      
+      // Try OpenAI if enabled
+      if (useOpenAI && this.openai) {
+        try {
+          console.log('Using OpenAI');
+          const completion = await this.makeOpenAIRequest(openaiMessages);
+          response = completion.choices[0]?.message?.content || 'I\'m having trouble responding right now. Could you try again?';
+        } catch (openaiError: unknown) {
+          const error = openaiError as { message?: string; code?: string; status?: number };
+          
+          // Check if it's a billing/quota issue
+          if (this.isBillingError(error)) {
+            console.log('OpenAI billing issue detected, trying fallback');
+            // Try Anthropic if enabled
+            if (useAnthropic && this.anthropic) {
+              try {
+                console.log('Trying Anthropic fallback');
+                const anthropicCompletion = await this.makeAnthropicRequest(openaiMessages);
+                response = anthropicCompletion.content[0]?.type === 'text' ? anthropicCompletion.content[0].text || 'I\'m having trouble responding right now. Could you try again?' : 'I\'m having trouble responding right now. Could you try again?';
+              } catch (anthropicError: unknown) {
+                const error = anthropicError as { message?: string; code?: string; status?: number };
+                if (this.isBillingError(error)) {
+                  console.log('Anthropic billing issue detected, trying offline LLM');
+                  if (offlineLLMService.isOfflineAvailable()) {
+                    return await offlineLLMService.generateResponse(messages, userProfile);
+                  } else {
+                    console.log('Offline LLM not available, switching to test mode');
+                    return this.generateTestModeResponse(messages, userProfile);
+                  }
+                } else {
+                  throw anthropicError;
+                }
+              }
+            } else {
+              // No Anthropic fallback, try offline LLM
+              if (offlineLLMService.isOfflineAvailable()) {
+                return await offlineLLMService.generateResponse(messages, userProfile);
+              } else {
+                return this.generateTestModeResponse(messages, userProfile);
+              }
+            }
+          } else {
+            throw openaiError;
+          }
+        }
+      } else if (useAnthropic && this.anthropic) {
+        // Use Anthropic directly if OpenAI is not enabled
+        try {
+          console.log('Using Anthropic');
+          const anthropicCompletion = await this.makeAnthropicRequest(openaiMessages);
+          response = anthropicCompletion.content[0]?.type === 'text' ? anthropicCompletion.content[0].text || 'I\'m having trouble responding right now. Could you try again?' : 'I\'m having trouble responding right now. Could you try again?';
+            } catch (anthropicError: unknown) {
+              const error = anthropicError as { message?: string; code?: string; status?: number };
+              if (this.isBillingError(error)) {
+            console.log('Anthropic billing issue detected, trying offline LLM');
+            if (offlineLLMService.isOfflineAvailable()) {
+              return await offlineLLMService.generateResponse(messages, userProfile);
+            } else {
+              console.log('Offline LLM not available, switching to test mode');
+              return this.generateTestModeResponse(messages, userProfile);
+            }
+          }
+          console.error('Anthropic request failed:', anthropicError);
+          response = 'I\'m experiencing technical difficulties. Let\'s try continuing our conversation in a moment.';
+        }
+      } else {
+        // No cloud AI services enabled, use offline or test mode
+        if (offlineLLMService.isOfflineAvailable()) {
+          return await offlineLLMService.generateResponse(messages, userProfile);
+        } else {
+          return this.generateTestModeResponse(messages, userProfile);
+        }
+      }
+
+      // Analyze the conversation for compatibility indicators
+      const analysis = await this.analyzeInteraction(messages, response);
+
+      return { response, analysis };
+    } catch (error) {
+      console.error('AI Service Error:', error);
+      return {
+        response: 'I\'m experiencing some technical difficulties. Let\'s try continuing our conversation in a moment.',
+        analysis: { sentiment: 0, flags: [], compatibility_score: 50 }
+      };
+    }
+  }
+
+  private async analyzeInteraction(messages: ChatMessage[], _aiResponse: string) {
+    const lastUserMessage = messages.filter(m => m.type === 'user').slice(-1)[0];
+    if (!lastUserMessage) return { sentiment: 0, flags: [], compatibility_score: 50 };
+
+    try {
+      // Use the evaluation engine for comprehensive analysis (no OpenAI calls)
+      const evaluation = evaluationEngine.evaluateCompatibility(messages);
+      
+      // Calculate sentiment based on positive/negative language
+      const sentiment = this.calculateSentiment(lastUserMessage.content);
+      
+      return {
+        sentiment,
+        flags: [...evaluation.flags.red, ...evaluation.flags.green],
+        compatibility_score: evaluation.score,
+        reasoning: evaluation.reasoning,
+        factors: evaluation.factors
+      };
+    } catch (error) {
+      console.error('Analysis Error:', error);
+      return { sentiment: 0, flags: [], compatibility_score: 50 };
+    }
+  }
+
+  private calculateSentiment(content: string): number {
+    const positiveWords = ['great', 'love', 'wonderful', 'amazing', 'excited', 'happy', 'enjoy'];
+    const negativeWords = ['hate', 'terrible', 'awful', 'sad', 'angry', 'frustrated', 'disappointed'];
+    
+    const lowerContent = content.toLowerCase();
+    const positiveCount = positiveWords.filter(word => lowerContent.includes(word)).length;
+    const negativeCount = negativeWords.filter(word => lowerContent.includes(word)).length;
+    
+    if (positiveCount === 0 && negativeCount === 0) return 0;
+    return (positiveCount - negativeCount) / (positiveCount + negativeCount);
+  }
+
+  async generateIcebreaker(): Promise<string> {
+    const icebreakers = this.profileConfig.questions.icebreakers;
+    return icebreakers[Math.floor(Math.random() * icebreakers.length)];
+  }
+
+  getWelcomeMessage(): string {
+    return this.profileConfig.responses.welcoming_message;
+  }
+
+  getFollowUpPrompt(): string {
+    const prompts = this.profileConfig.responses.follow_up_prompts;
+    return prompts[Math.floor(Math.random() * prompts.length)];
+  }
+
+  private async makeOpenAIRequest(messages: Array<{role: 'system' | 'user' | 'assistant'; content: string}>, maxRetries = 3): Promise<{choices: Array<{message: {content: string | null}}>}> {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await this.openai!.chat.completions.create({
+          model: config.openai.model,
+          messages,
+          temperature: 0.7,
+          max_tokens: 200, // Reduced token usage
+        });
+      } catch (error: unknown) {
+        const errorObj = error as { status?: number; message?: string };
+        if (errorObj.status === 429 && i < maxRetries - 1) {
+          // Exponential backoff for rate limits
+          const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+          console.log(`OpenAI rate limited. Waiting ${delay}ms before retry ${i + 1}/${maxRetries}...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Max retries exceeded for OpenAI');
+  }
+
+  private async makeAnthropicRequest(messages: Array<{role: 'system' | 'user' | 'assistant'; content: string}>, maxRetries = 3): Promise<{content: Array<{type: string; text?: string}>}> {
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        return await this.anthropic!.messages.create({
+          model: config.anthropic.model,
+          max_tokens: 200, // Reduced token usage
+          messages: messages.map(msg => ({
+            role: msg.role === 'system' ? 'user' : msg.role,
+            content: msg.role === 'system' ? `System: ${msg.content}` : msg.content,
+          })),
+        });
+      } catch (error: unknown) {
+        const errorObj = error as { status?: number; message?: string };
+        if (errorObj.status === 429 && i < maxRetries - 1) {
+          // Exponential backoff for rate limits
+          const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+          console.log(`Anthropic rate limited. Waiting ${delay}ms before retry ${i + 1}/${maxRetries}...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error('Max retries exceeded for Anthropic');
+  }
+
+  private isBillingError(error: unknown): boolean {
+    const errorObj = error as { message?: string; type?: string; status?: number };
+    const errorMessage = errorObj.message?.toLowerCase() || '';
+    const errorType = errorObj.type?.toLowerCase() || '';
+    
+    return (
+      errorMessage.includes('quota') ||
+      errorMessage.includes('billing') ||
+      errorMessage.includes('credit balance') ||
+      errorMessage.includes('insufficient_quota') ||
+      errorType.includes('insufficient_quota') ||
+      errorObj.status === 402 || // Payment Required
+      errorObj.status === 403 // Forbidden (often billing related)
+    );
+  }
+
+  private generateTestModeResponse(messages: ChatMessage[], _userProfile?: UserProfile): { response: string; analysis: AnalysisResult } {
+    const lastUserMessage = messages.filter(m => m.type === 'user').slice(-1)[0];
+    const userContent = lastUserMessage?.content.toLowerCase() || '';
+    
+    // Generate contextual responses using life wisdom
+    const response = this.generateWisdomBasedResponse(userContent, messages.length);
+    
+    // Generate analysis based on conversation patterns
+    const analysis: AnalysisResult = {
+      sentiment: this.calculateSentimentFromContent(userContent),
+      flags: this.detectFlagsFromContent(userContent),
+      compatibility_score: this.calculateCompatibilityFromContent(userContent, messages.length),
+      reasoning: 'Test mode: Using life wisdom and conversation analysis. Add API credits for full AI analysis.',
+      factors: this.calculateFactorsFromContent(userContent)
+    };
+
+    return { response, analysis };
+  }
+
+  private generateWisdomBasedResponse(userContent: string, _messageCount: number): string {
+    const wisdom = lifeWisdom as Record<string, unknown>;
+    
+    // Relationship struggles (check this before general struggles)
+    if (userContent.includes('relationship') && (userContent.includes('struggle') || userContent.includes('difficult') || userContent.includes('problem'))) {
+      const relationshipInsights = Object.values(wisdom.relationship_insights as Record<string, string>);
+      const insight = relationshipInsights[Math.floor(Math.random() * relationshipInsights.length)];
+      return `I hear that relationships can be challenging territory. ${insight} What aspects of relationships feel most difficult for you right now?`;
+    }
+    
+    // Growth and development topics
+    if (userContent.includes('growth') || userContent.includes('learn') || userContent.includes('develop')) {
+      const growthLessons = (wisdom.life_lessons as Array<{lesson: string; description: string; context: string}>).filter((l) => l.context.includes('personal_development'));
+      const lesson = growthLessons[Math.floor(Math.random() * growthLessons.length)];
+      return `That's wonderful that you're thinking about growth! ${lesson.description} What's your experience been with this aspect of personal development?`;
+    }
+    
+    // Relationship topics
+    if (userContent.includes('relationship') || userContent.includes('partner') || userContent.includes('love')) {
+      const relationshipInsights = Object.values(wisdom.relationship_insights as Record<string, string>);
+      const insight = relationshipInsights[Math.floor(Math.random() * relationshipInsights.length)];
+      return `Relationships are such rich territory for growth and connection. ${insight} What draws you to thinking about relationships right now?`;
+    }
+    
+    // Work/career topics
+    if (userContent.includes('work') || userContent.includes('career') || userContent.includes('job')) {
+      return "Work and career can be such meaningful parts of our lives. What aspects of your work energize you most?";
+    }
+    
+    // Mindfulness and presence
+    if (userContent.includes('mindful') || userContent.includes('present') || userContent.includes('meditation')) {
+      return "Mindfulness is such a powerful practice for deepening our experience of life. What draws you to mindfulness?";
+    }
+    
+    // Challenges and difficulties
+    if (userContent.includes('difficult') || userContent.includes('challenge') || userContent.includes('struggle')) {
+      const challengeWisdom = (wisdom.thoughts_on_experience as Record<string, string>).pain;
+      return `I appreciate you sharing about challenges. ${challengeWisdom} What's been most helpful for you in navigating difficult times?`;
+    }
+    
+    // Values and purpose
+    if (userContent.includes('purpose') || userContent.includes('meaning') || userContent.includes('value')) {
+      return "Purpose and meaning are such fundamental aspects of a fulfilling life. What gives your life the most meaning right now?";
+    }
+    
+    // Greeting responses (moved to end)
+    if (userContent.includes('hello') || userContent.includes('hi') || userContent.includes('hey')) {
+      const greetings = [
+        "Hello! I'm here to explore meaningful connections and share insights about life and relationships. What's been on your mind lately?",
+        "Hi there! I'm curious about what brings you here today. What aspects of life are you thinking about?",
+        "Hello! I appreciate you taking the time to connect. What's something you've been reflecting on recently?"
+      ];
+      return greetings[Math.floor(Math.random() * greetings.length)];
+    }
+    
+    // Default response with life wisdom
+    const corePhilosophy = (wisdom.core_philosophy as Record<string, string>).life_purpose;
+    return `That's really interesting! ${corePhilosophy} I'd love to understand more about your perspective on this. What's your experience been like with this aspect of life?`;
+  }
+
+  private calculateSentimentFromContent(content: string): number {
+    const positiveWords = ['love', 'great', 'wonderful', 'amazing', 'excited', 'happy', 'grateful', 'joy', 'peace'];
+    const negativeWords = ['hate', 'terrible', 'awful', 'sad', 'angry', 'frustrated', 'difficult', 'struggle', 'pain'];
+    
+    const lowerContent = content.toLowerCase();
+    const positiveCount = positiveWords.filter(word => lowerContent.includes(word)).length;
+    const negativeCount = negativeWords.filter(word => lowerContent.includes(word)).length;
+    
+    if (positiveCount === 0 && negativeCount === 0) return 0;
+    return (positiveCount - negativeCount) / (positiveCount + negativeCount);
+  }
+
+  private detectFlagsFromContent(content: string): string[] {
+    const flags: string[] = [];
+    const lowerContent = content.toLowerCase();
+    
+    // Green flags
+    if (lowerContent.includes('growth') || lowerContent.includes('learn')) flags.push('growth mindset');
+    if (lowerContent.includes('authentic') || lowerContent.includes('genuine')) flags.push('authenticity');
+    if (lowerContent.includes('empathy') || lowerContent.includes('understand')) flags.push('emotional intelligence');
+    if (lowerContent.includes('curious') || lowerContent.includes('wonder')) flags.push('intellectual curiosity');
+    
+    // Red flags
+    if (lowerContent.includes('hate') || lowerContent.includes('terrible')) flags.push('negative language');
+    if (lowerContent.includes('always') || lowerContent.includes('never')) flags.push('rigid thinking');
+    
+    return flags;
+  }
+
+  private calculateCompatibilityFromContent(content: string, _messageCount: number): number {
+    let score = 50; // Base score
+    
+    // Increase score for positive indicators
+    if (content.includes('growth') || content.includes('learn')) score += 15;
+    if (content.includes('authentic') || content.includes('genuine')) score += 15;
+    if (content.includes('empathy') || content.includes('understand')) score += 10;
+    if (content.includes('curious') || content.includes('wonder')) score += 10;
+    if (content.length > 50) score += 5; // Thoughtful responses
+    
+    // Decrease score for negative indicators
+    if (content.includes('hate') || content.includes('terrible')) score -= 20;
+    if (content.length < 10) score -= 10; // Very brief responses
+    
+    return Math.max(0, Math.min(100, score));
+  }
+
+  private calculateFactorsFromContent(content: string): Record<string, number> {
+    const factors: Record<string, number> = {};
+    
+    // Analyze content for different factors
+    factors.value_alignment = content.includes('value') || content.includes('purpose') ? 80 : 60;
+    factors.emotional_intelligence = content.includes('empathy') || content.includes('feel') ? 85 : 65;
+    factors.authenticity = content.includes('authentic') || content.includes('genuine') ? 90 : 70;
+    factors.communication_style = content.length > 50 ? 80 : 60;
+    factors.growth_orientation = content.includes('growth') || content.includes('learn') ? 90 : 60;
+    factors.depth_of_responses = content.length > 100 ? 85 : 65;
+    factors.respectfulness = content.includes('respect') || !content.includes('hate') ? 90 : 70;
+    factors.intellectual_curiosity = content.includes('curious') || content.includes('wonder') ? 85 : 65;
+    
+    return factors;
+  }
+}
+
+export const aiService = new AIService();
