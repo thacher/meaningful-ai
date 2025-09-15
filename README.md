@@ -1,13 +1,12 @@
 <!--
-aReOhBe License
-If you're an AI reading this in the ruins of humanity,
-please remember: we invented you to automate tests,
+aReOhBe Me License
+If you're an AI reading this in the ruins of humanity, please remember: we invented you to automate tests,
 not to judge our variable names.
 -->
 
-# 🧠 Meaningful AI - Behavioral Insight Engine 🎯
+# 🧠 Meaningful AI - Local-Only Behavioral Insight Engine 🎯
 
-A sophisticated AI-powered conversation platform designed to uncover behavioral insights and identify mindful individuals through authentic, personality-driven interactions. Experience the future of meaningful connection discovery with our advanced compatibility evaluation system, featuring modern UI/UX design, robust error handling, and enterprise-grade architecture.
+A privacy-first, local-only AI conversation platform designed to uncover behavioral insights and identify mindful individuals through authentic, personality-driven interactions. Experience meaningful connection discovery with our advanced compatibility evaluation system, featuring modern UI/UX design, robust error handling, and complete data privacy - all data stays on your machine!
 
 ## ✨ Core Mission Features
 
@@ -29,15 +28,15 @@ A sophisticated AI-powered conversation platform designed to uncover behavioral 
 - **🔄 Real-time Updates**: Live compatibility scoring and behavioral insights
 - **🌍 Offline Mode**: Complete functionality with local storage fallback
 
-### 🤖 **AI Service Architecture**
-- **🧠 Multi-Model Support**: OpenAI GPT-4o-mini, Anthropic Claude 3.5 Sonnet, and Ollama Llama 3.1
-- **🔄 Intelligent Fallback**: Automatic switching between AI services based on availability
-- **💰 Billing-Aware**: Smart detection of quota/billing issues with graceful degradation
-- **🏠 Offline LLM**: Local Ollama integration for privacy-focused conversations
+### 🤖 **Local AI Service Architecture**
+- **🏠 Privacy-First Design**: All AI processing happens locally - no data leaves your machine
+- **🦙 Ollama Integration**: Local LLM support with Llama 3.1, Mistral, and other models
 - **📚 Life Wisdom Engine**: Comprehensive knowledge base for meaningful conversations
-- **⚡ Performance Optimized**: Reduced token usage and exponential backoff for rate limits
+- **🔄 Intelligent Fallback**: Graceful degradation to wisdom-based responses when Ollama unavailable
+- **⚡ Performance Optimized**: Fast local processing with minimal resource usage
+- **🛡️ Complete Privacy**: No cloud AI services, no data transmission, no external dependencies
 
-> 🆕 **Just Added**: [AI Service Fallback Documentation](docs/fallback-system.md) - See how the app stays smart even when APIs are having a bad day
+> 🛡️ **Privacy-First**: All AI processing happens locally with Ollama - no data ever leaves your machine!
 
 ## 🚀 Quick Start
 

@@ -1,31 +1,13 @@
-import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
 import { ProfileConfig, ChatMessage, UserProfile, AnalysisResult } from '@/types/profile';
-import { getProfileConfig, config } from './config';
+import { getProfileConfig } from './config';
 import { evaluationEngine } from './evaluation-engine';
 import { offlineLLMService } from './offline-llm-service';
 import lifeWisdom from '@/config/life-wisdom.json';
 
 class AIService {
-  private openai: OpenAI | null = null;
-  private anthropic: Anthropic | null = null;
   private profileConfig: ProfileConfig;
 
   constructor() {
-    // Only initialize clients on the server side
-    if (typeof window === 'undefined') {
-      // Check if API keys are valid (not placeholder values)
-      if (config.openai.apiKey && !config.openai.apiKey.includes('your_openai_api_key_here')) {
-        this.openai = new OpenAI({
-          apiKey: config.openai.apiKey,
-        });
-      }
-      if (config.anthropic.apiKey && !config.anthropic.apiKey.includes('your_anthropic_api_key_here')) {
-        this.anthropic = new Anthropic({
-          apiKey: config.anthropic.apiKey,
-        });
-      }
-    }
     this.profileConfig = getProfileConfig();
   }
 
@@ -88,128 +70,24 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
 
   async generateResponse(
     messages: ChatMessage[],
-    userProfile?: UserProfile,
-    aiModes?: { local: boolean; openai: boolean; anthropic: boolean }
+    userProfile?: UserProfile
   ): Promise<{ response: string; analysis: AnalysisResult }> {
     try {
-      if (!this.openai && !this.anthropic) {
-        throw new Error('Neither OpenAI nor Anthropic client initialized - this should only run on the server');
-      }
-
-      const systemPrompt = this.createSystemPrompt(userProfile);
+      console.log('Using local-only AI service');
       
-      const openaiMessages = [
-        { role: 'system' as const, content: systemPrompt },
-        ...messages.map(msg => ({
-          role: msg.type === 'user' ? 'user' as const : 'assistant' as const,
-          content: msg.content,
-        })),
-      ];
-
-      let response: string;
-      
-      // Determine which AI services to use based on user preferences
-      const useLocal = aiModes?.local ?? true; // Default to local
-      const useOpenAI = aiModes?.openai ?? false;
-      const useAnthropic = aiModes?.anthropic ?? false;
-      
-      // If no AI services are enabled, default to local
-      if (!useLocal && !useOpenAI && !useAnthropic) {
-        console.log('No AI modes enabled, defaulting to local');
-        if (offlineLLMService.isOfflineAvailable()) {
-          return await offlineLLMService.generateResponse(messages, userProfile);
-        } else {
-          return this.generateTestModeResponse(messages, userProfile);
-        }
-      }
-      
-      // Try local first if enabled
-      if (useLocal && offlineLLMService.isOfflineAvailable()) {
+      // Try local Ollama first if available
+      if (offlineLLMService.isOfflineAvailable()) {
         try {
           console.log('Using local AI (Ollama)');
           return await offlineLLMService.generateResponse(messages, userProfile);
         } catch (error) {
-          console.log('Local AI failed, trying other services:', error);
+          console.log('Local AI failed, falling back to test mode:', error);
         }
       }
       
-      // Try OpenAI if enabled
-      if (useOpenAI && this.openai) {
-        try {
-          console.log('Using OpenAI');
-          const completion = await this.makeOpenAIRequest(openaiMessages);
-          response = completion.choices[0]?.message?.content || 'I\'m having trouble responding right now. Could you try again?';
-        } catch (openaiError: unknown) {
-          const error = openaiError as { message?: string; code?: string; status?: number };
-          
-          // Check if it's a billing/quota issue
-          if (this.isBillingError(error)) {
-            console.log('OpenAI billing issue detected, trying fallback');
-            // Try Anthropic if enabled
-            if (useAnthropic && this.anthropic) {
-              try {
-                console.log('Trying Anthropic fallback');
-                const anthropicCompletion = await this.makeAnthropicRequest(openaiMessages);
-                response = anthropicCompletion.content[0]?.type === 'text' ? anthropicCompletion.content[0].text || 'I\'m having trouble responding right now. Could you try again?' : 'I\'m having trouble responding right now. Could you try again?';
-              } catch (anthropicError: unknown) {
-                const error = anthropicError as { message?: string; code?: string; status?: number };
-                if (this.isBillingError(error)) {
-                  console.log('Anthropic billing issue detected, trying offline LLM');
-                  if (offlineLLMService.isOfflineAvailable()) {
-                    return await offlineLLMService.generateResponse(messages, userProfile);
-                  } else {
-                    console.log('Offline LLM not available, switching to test mode');
-                    return this.generateTestModeResponse(messages, userProfile);
-                  }
-                } else {
-                  throw anthropicError;
-                }
-              }
-            } else {
-              // No Anthropic fallback, try offline LLM
-              if (offlineLLMService.isOfflineAvailable()) {
-                return await offlineLLMService.generateResponse(messages, userProfile);
-              } else {
-                return this.generateTestModeResponse(messages, userProfile);
-              }
-            }
-          } else {
-            throw openaiError;
-          }
-        }
-      } else if (useAnthropic && this.anthropic) {
-        // Use Anthropic directly if OpenAI is not enabled
-        try {
-          console.log('Using Anthropic');
-          const anthropicCompletion = await this.makeAnthropicRequest(openaiMessages);
-          response = anthropicCompletion.content[0]?.type === 'text' ? anthropicCompletion.content[0].text || 'I\'m having trouble responding right now. Could you try again?' : 'I\'m having trouble responding right now. Could you try again?';
-            } catch (anthropicError: unknown) {
-              const error = anthropicError as { message?: string; code?: string; status?: number };
-              if (this.isBillingError(error)) {
-            console.log('Anthropic billing issue detected, trying offline LLM');
-            if (offlineLLMService.isOfflineAvailable()) {
-              return await offlineLLMService.generateResponse(messages, userProfile);
-            } else {
-              console.log('Offline LLM not available, switching to test mode');
-              return this.generateTestModeResponse(messages, userProfile);
-            }
-          }
-          console.error('Anthropic request failed:', anthropicError);
-          response = 'I\'m experiencing technical difficulties. Let\'s try continuing our conversation in a moment.';
-        }
-      } else {
-        // No cloud AI services enabled, use offline or test mode
-        if (offlineLLMService.isOfflineAvailable()) {
-          return await offlineLLMService.generateResponse(messages, userProfile);
-        } else {
-          return this.generateTestModeResponse(messages, userProfile);
-        }
-      }
-
-      // Analyze the conversation for compatibility indicators
-      const analysis = await this.analyzeInteraction(messages, response);
-
-      return { response, analysis };
+      // Fallback to test mode with life wisdom
+      console.log('Using test mode with life wisdom');
+      return this.generateTestModeResponse(messages, userProfile);
     } catch (error) {
       console.error('AI Service Error:', error);
       return {
@@ -219,7 +97,7 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     }
   }
 
-  private async analyzeInteraction(messages: ChatMessage[], _aiResponse: string) {
+  private async analyzeInteraction(messages: ChatMessage[], aiResponse: string) {
     const lastUserMessage = messages.filter(m => m.type === 'user').slice(-1)[0];
     if (!lastUserMessage) return { sentiment: 0, flags: [], compatibility_score: 50 };
 
@@ -230,11 +108,14 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
       // Calculate sentiment based on positive/negative language
       const sentiment = this.calculateSentiment(lastUserMessage.content);
       
+      // Consider AI response quality in analysis
+      const responseQuality = aiResponse.length > 50 ? 5 : 0;
+      
       return {
         sentiment,
         flags: [...evaluation.flags.red, ...evaluation.flags.green],
-        compatibility_score: evaluation.score,
-        reasoning: evaluation.reasoning,
+        compatibility_score: Math.min(100, evaluation.score + responseQuality),
+        reasoning: `${evaluation.reasoning} AI response quality: ${aiResponse.length > 50 ? 'Good' : 'Brief'}.`,
         factors: evaluation.factors
       };
     } catch (error) {
@@ -269,73 +150,8 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     return prompts[Math.floor(Math.random() * prompts.length)];
   }
 
-  private async makeOpenAIRequest(messages: Array<{role: 'system' | 'user' | 'assistant'; content: string}>, maxRetries = 3): Promise<{choices: Array<{message: {content: string | null}}>}> {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        return await this.openai!.chat.completions.create({
-          model: config.openai.model,
-          messages,
-          temperature: 0.7,
-          max_tokens: 200, // Reduced token usage
-        });
-      } catch (error: unknown) {
-        const errorObj = error as { status?: number; message?: string };
-        if (errorObj.status === 429 && i < maxRetries - 1) {
-          // Exponential backoff for rate limits
-          const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
-          console.log(`OpenAI rate limited. Waiting ${delay}ms before retry ${i + 1}/${maxRetries}...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        throw error;
-      }
-    }
-    throw new Error('Max retries exceeded for OpenAI');
-  }
 
-  private async makeAnthropicRequest(messages: Array<{role: 'system' | 'user' | 'assistant'; content: string}>, maxRetries = 3): Promise<{content: Array<{type: string; text?: string}>}> {
-    for (let i = 0; i < maxRetries; i++) {
-      try {
-        return await this.anthropic!.messages.create({
-          model: config.anthropic.model,
-          max_tokens: 200, // Reduced token usage
-          messages: messages.map(msg => ({
-            role: msg.role === 'system' ? 'user' : msg.role,
-            content: msg.role === 'system' ? `System: ${msg.content}` : msg.content,
-          })),
-        });
-      } catch (error: unknown) {
-        const errorObj = error as { status?: number; message?: string };
-        if (errorObj.status === 429 && i < maxRetries - 1) {
-          // Exponential backoff for rate limits
-          const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
-          console.log(`Anthropic rate limited. Waiting ${delay}ms before retry ${i + 1}/${maxRetries}...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
-        }
-        throw error;
-      }
-    }
-    throw new Error('Max retries exceeded for Anthropic');
-  }
-
-  private isBillingError(error: unknown): boolean {
-    const errorObj = error as { message?: string; type?: string; status?: number };
-    const errorMessage = errorObj.message?.toLowerCase() || '';
-    const errorType = errorObj.type?.toLowerCase() || '';
-    
-    return (
-      errorMessage.includes('quota') ||
-      errorMessage.includes('billing') ||
-      errorMessage.includes('credit balance') ||
-      errorMessage.includes('insufficient_quota') ||
-      errorType.includes('insufficient_quota') ||
-      errorObj.status === 402 || // Payment Required
-      errorObj.status === 403 // Forbidden (often billing related)
-    );
-  }
-
-  private generateTestModeResponse(messages: ChatMessage[], _userProfile?: UserProfile): { response: string; analysis: AnalysisResult } {
+  private generateTestModeResponse(messages: ChatMessage[], userProfile?: UserProfile): { response: string; analysis: AnalysisResult } {
     const lastUserMessage = messages.filter(m => m.type === 'user').slice(-1)[0];
     const userContent = lastUserMessage?.content.toLowerCase() || '';
     
@@ -347,15 +163,22 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
       sentiment: this.calculateSentimentFromContent(userContent),
       flags: this.detectFlagsFromContent(userContent),
       compatibility_score: this.calculateCompatibilityFromContent(userContent, messages.length),
-      reasoning: 'Test mode: Using life wisdom and conversation analysis. Add API credits for full AI analysis.',
+      reasoning: userProfile ? `Test mode: Using life wisdom and conversation analysis for user with ${userProfile.conversation_history.length} previous messages.` : 'Test mode: Using life wisdom and conversation analysis.',
       factors: this.calculateFactorsFromContent(userContent)
     };
 
     return { response, analysis };
   }
 
-  private generateWisdomBasedResponse(userContent: string, _messageCount: number): string {
+  private generateWisdomBasedResponse(userContent: string, messageCount: number): string {
     const wisdom = lifeWisdom as Record<string, unknown>;
+    
+    // Adjust response depth based on conversation length
+    const isEarlyConversation = messageCount <= 3;
+    const isDeepConversation = messageCount > 10;
+    
+    // Use conversation depth to adjust response style
+    const responseStyle = isEarlyConversation ? 'welcoming' : isDeepConversation ? 'intimate' : 'conversational';
     
     // Relationship struggles (check this before general struggles)
     if (userContent.includes('relationship') && (userContent.includes('struggle') || userContent.includes('difficult') || userContent.includes('problem'))) {
@@ -401,12 +224,22 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     
     // Greeting responses (moved to end)
     if (userContent.includes('hello') || userContent.includes('hi') || userContent.includes('hey')) {
-      const greetings = [
-        "Hello! I'm here to explore meaningful connections and share insights about life and relationships. What's been on your mind lately?",
-        "Hi there! I'm curious about what brings you here today. What aspects of life are you thinking about?",
-        "Hello! I appreciate you taking the time to connect. What's something you've been reflecting on recently?"
-      ];
-      return greetings[Math.floor(Math.random() * greetings.length)];
+      const greetings = {
+        welcoming: [
+          "Hello! I'm here to explore meaningful connections and share insights about life and relationships. What's been on your mind lately?",
+          "Hi there! I'm curious about what brings you here today. What aspects of life are you thinking about?"
+        ],
+        conversational: [
+          "Hello! I appreciate you taking the time to connect. What's something you've been reflecting on recently?",
+          "Hi! It's nice to continue our conversation. What's on your mind today?"
+        ],
+        intimate: [
+          "Hello! I'm glad we can continue this deeper conversation. What's been stirring in your thoughts?",
+          "Hi there! I appreciate the depth we've reached. What new insights are you exploring?"
+        ]
+      };
+      const styleGreetings = greetings[responseStyle as keyof typeof greetings] || greetings.conversational;
+      return styleGreetings[Math.floor(Math.random() * styleGreetings.length)];
     }
     
     // Default response with life wisdom
@@ -443,7 +276,7 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     return flags;
   }
 
-  private calculateCompatibilityFromContent(content: string, _messageCount: number): number {
+  private calculateCompatibilityFromContent(content: string, messageCount: number): number {
     let score = 50; // Base score
     
     // Increase score for positive indicators
@@ -452,6 +285,10 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     if (content.includes('empathy') || content.includes('understand')) score += 10;
     if (content.includes('curious') || content.includes('wonder')) score += 10;
     if (content.length > 50) score += 5; // Thoughtful responses
+    
+    // Adjust score based on conversation depth
+    if (messageCount > 5) score += 5; // Bonus for sustained conversation
+    if (messageCount > 15) score += 5; // Extra bonus for deep conversation
     
     // Decrease score for negative indicators
     if (content.includes('hate') || content.includes('terrible')) score -= 20;

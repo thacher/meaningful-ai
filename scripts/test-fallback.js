@@ -5,7 +5,7 @@
  * Run with: node scripts/test-fallback.js
  */
 
-const http = require('http');
+// Using fetch API instead of http module
 
 async function testFallback() {
   console.log('🧪 Testing AI Service Fallback Functionality...\n');

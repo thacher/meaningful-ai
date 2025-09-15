@@ -17,13 +17,6 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
-  
-  // AI Mode Selection State
-  const [aiModes, setAiModes] = useState({
-    local: true,      // Default to local mode
-    openai: false,
-    anthropic: false
-  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -134,7 +127,6 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
         body: JSON.stringify({
           sessionId,
           messages: [userMessage],
-          aiModes, // Include AI mode preferences
         }),
       });
 
@@ -181,13 +173,6 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
       e.preventDefault();
       sendMessage();
     }
-  };
-
-  const handleAiModeChange = (mode: 'local' | 'openai' | 'anthropic') => {
-    setAiModes(prev => ({
-      ...prev,
-      [mode]: !prev[mode]
-    }));
   };
 
   if (!isInitialized) {
@@ -273,45 +258,12 @@ export default function ChatInterface({ sessionId }: ChatInterfaceProps) {
       {/* Input Area */}
       <div className="bg-white/90 backdrop-blur-sm border-t border-gray-200 p-6 shadow-lg">
         <div className="max-w-4xl mx-auto">
-          {/* AI Mode Selection and Clear Conversation */}
+          {/* Local AI Status and Clear Conversation */}
           <div className="flex justify-between items-center mb-4">
-            {/* AI Mode Selection */}
-            <div className="flex items-center space-x-4">
-              <span className="text-sm font-medium text-gray-700">AI Mode:</span>
-              <div className="flex items-center space-x-3">
-                {/* Local Mode */}
-                <label className="flex items-center space-x-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={aiModes.local}
-                    onChange={() => handleAiModeChange('local')}
-                    className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
-                  />
-                  <span className="text-sm text-gray-700">Local (Fast)</span>
-                </label>
-                
-                {/* OpenAI Mode */}
-                <label className="flex items-center space-x-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={aiModes.openai}
-                    onChange={() => handleAiModeChange('openai')}
-                    className="w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500 focus:ring-2"
-                  />
-                  <span className="text-sm text-gray-700">OpenAI</span>
-                </label>
-                
-                {/* Anthropic Mode */}
-                <label className="flex items-center space-x-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={aiModes.anthropic}
-                    onChange={() => handleAiModeChange('anthropic')}
-                    className="w-4 h-4 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500 focus:ring-2"
-                  />
-                  <span className="text-sm text-gray-700">Anthropic</span>
-                </label>
-              </div>
+            {/* Local AI Status */}
+            <div className="flex items-center space-x-2">
+              <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+              <span className="text-sm text-gray-700 font-medium">Local AI (Privacy-First)</span>
             </div>
             
             {/* Clear Conversation Button */}

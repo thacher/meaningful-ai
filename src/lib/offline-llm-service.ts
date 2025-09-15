@@ -23,7 +23,8 @@ export class OfflineLLMService {
       this.isAvailable = true;
       console.log('✅ Offline LLM Service: Ollama connected successfully');
     } catch (error: unknown) {
-      console.log('⚠️ Offline LLM Service: Ollama not available - using test mode fallback');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.log('⚠️ Offline LLM Service: Ollama not available - using test mode fallback. Error:', errorMessage);
       this.isAvailable = false;
     }
   }
@@ -144,18 +145,21 @@ CRITICAL: Ask ONLY ONE question per response. Do not ask multiple questions or p
 ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conversation_history.length} previous messages. Their current compatibility score is ${userProfile.evaluation.compatibility_score}/100.` : ''}`;
   }
 
-  private async analyzeInteraction(messages: ChatMessage[], _aiResponse: string): Promise<AnalysisResult> {
+  private async analyzeInteraction(messages: ChatMessage[], aiResponse: string): Promise<AnalysisResult> {
     const lastUserMessage = messages.filter(m => m.type === 'user').slice(-1)[0];
     if (!lastUserMessage) return { sentiment: 0, flags: [], compatibility_score: 50 };
 
     // Simple analysis based on content patterns
     const userContent = lastUserMessage.content.toLowerCase();
     
+    // Consider AI response quality in analysis
+    const responseQuality = aiResponse.length > 50 ? 10 : 0;
+    
     return {
       sentiment: this.calculateSentimentFromContent(userContent),
       flags: this.detectFlagsFromContent(userContent),
-      compatibility_score: this.calculateCompatibilityFromContent(userContent, messages.length),
-      reasoning: 'Offline LLM: Using local model analysis. Enhanced with life wisdom integration.',
+      compatibility_score: Math.min(100, this.calculateCompatibilityFromContent(userContent, messages.length) + responseQuality),
+      reasoning: `Offline LLM: Using local model analysis. Response quality: ${aiResponse.length > 50 ? 'Good' : 'Brief'}. Enhanced with life wisdom integration.`,
       factors: this.calculateFactorsFromContent(userContent)
     };
   }
@@ -172,15 +176,22 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
       sentiment: this.calculateSentimentFromContent(userContent),
       flags: this.detectFlagsFromContent(userContent),
       compatibility_score: this.calculateCompatibilityFromContent(userContent, messages.length),
-      reasoning: 'Test mode: Using life wisdom and conversation analysis. Install Ollama for enhanced offline AI.',
+      reasoning: userProfile ? `Test mode: Using life wisdom and conversation analysis for user with ${userProfile.conversation_history.length} previous messages. Install Ollama for enhanced offline AI.` : 'Test mode: Using life wisdom and conversation analysis. Install Ollama for enhanced offline AI.',
       factors: this.calculateFactorsFromContent(userContent)
     };
 
     return { response, analysis };
   }
 
-  private generateWisdomBasedResponse(userContent: string, _messageCount: number): string {
+  private generateWisdomBasedResponse(userContent: string, messageCount: number): string {
     const wisdom = lifeWisdom as Record<string, unknown>;
+    
+    // Adjust response depth based on conversation length
+    const isEarlyConversation = messageCount <= 3;
+    const isDeepConversation = messageCount > 10;
+    
+    // Use conversation depth to adjust response style
+    const responseStyle = isEarlyConversation ? 'welcoming' : isDeepConversation ? 'intimate' : 'conversational';
     
     // Relationship struggles (check this before general struggles)
     if (userContent.includes('relationship') && (userContent.includes('struggle') || userContent.includes('difficult') || userContent.includes('problem'))) {
@@ -226,12 +237,22 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     
     // Greeting responses (moved to end)
     if (userContent.includes('hello') || userContent.includes('hi') || userContent.includes('hey')) {
-      const greetings = [
-        "Hello! I'm here to explore meaningful connections and share insights about life and relationships. What's been on your mind lately?",
-        "Hi there! I'm curious about what brings you here today. What aspects of life are you thinking about?",
-        "Hello! I appreciate you taking the time to connect. What's something you've been reflecting on recently?"
-      ];
-      return greetings[Math.floor(Math.random() * greetings.length)];
+      const greetings = {
+        welcoming: [
+          "Hello! I'm here to explore meaningful connections and share insights about life and relationships. What's been on your mind lately?",
+          "Hi there! I'm curious about what brings you here today. What aspects of life are you thinking about?"
+        ],
+        conversational: [
+          "Hello! I appreciate you taking the time to connect. What's something you've been reflecting on recently?",
+          "Hi! It's nice to continue our conversation. What's on your mind today?"
+        ],
+        intimate: [
+          "Hello! I'm glad we can continue this deeper conversation. What's been stirring in your thoughts?",
+          "Hi there! I appreciate the depth we've reached. What new insights are you exploring?"
+        ]
+      };
+      const styleGreetings = greetings[responseStyle as keyof typeof greetings] || greetings.conversational;
+      return styleGreetings[Math.floor(Math.random() * styleGreetings.length)];
     }
     
     // Default response with life wisdom
@@ -268,7 +289,7 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     return flags;
   }
 
-  private calculateCompatibilityFromContent(content: string, _messageCount: number): number {
+  private calculateCompatibilityFromContent(content: string, messageCount: number): number {
     let score = 50; // Base score
     
     // Increase score for positive indicators
@@ -277,6 +298,10 @@ ${userProfile ? `\nCONVERSATION CONTEXT:\nThis user has had ${userProfile.conver
     if (content.includes('empathy') || content.includes('understand')) score += 10;
     if (content.includes('curious') || content.includes('wonder')) score += 10;
     if (content.length > 50) score += 5; // Thoughtful responses
+    
+    // Adjust score based on conversation depth
+    if (messageCount > 5) score += 5; // Bonus for sustained conversation
+    if (messageCount > 15) score += 5; // Extra bonus for deep conversation
     
     // Decrease score for negative indicators
     if (content.includes('hate') || content.includes('terrible')) score -= 20;

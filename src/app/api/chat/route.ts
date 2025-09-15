@@ -5,7 +5,7 @@ import { ChatMessage } from '@/types/profile';
 
 export async function POST(request: NextRequest) {
   try {
-    const { sessionId, messages, aiModes } = await request.json();
+    const { sessionId, messages } = await request.json();
 
     if (!sessionId || !messages) {
       return NextResponse.json(
@@ -23,8 +23,8 @@ export async function POST(request: NextRequest) {
     // Combine conversation history with the new user message
     const allMessages = [...conversationHistory, ...messages];
 
-    // Generate AI response with mode preferences
-    const { response, analysis } = await aiService.generateResponse(allMessages, userProfile || undefined, aiModes);
+    // Generate AI response (local-only)
+    const { response, analysis } = await aiService.generateResponse(allMessages, userProfile || undefined);
 
     // Create AI message
     const aiMessage: ChatMessage = {

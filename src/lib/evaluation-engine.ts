@@ -11,7 +11,7 @@ export class EvaluationEngine {
   /**
    * Evaluates a conversation and returns a comprehensive compatibility score
    */
-  evaluateCompatibility(messages: ChatMessage[], _existingProfile?: UserProfile): {
+  evaluateCompatibility(messages: ChatMessage[], existingProfile?: UserProfile): {
     score: number;
     flags: { red: string[]; green: string[] };
     factors: Record<string, number>;
@@ -29,6 +29,26 @@ export class EvaluationEngine {
 
     const factors = this.evaluateFactors(userMessages);
     const flags = this.detectFlags(userMessages);
+    
+    // Adjust evaluation based on existing profile if available
+    if (existingProfile) {
+      // Consider conversation history length for context
+      const historyLength = existingProfile.conversation_history.length;
+      if (historyLength > 10) {
+        factors.conversation_depth = Math.min(100, factors.conversation_depth + 10);
+      }
+      
+      // Consider previous compatibility score for consistency
+      const previousScore = existingProfile.evaluation.compatibility_score;
+      if (previousScore > 70) {
+        factors.consistency = 85;
+      } else if (previousScore < 30) {
+        factors.consistency = 25;
+      } else {
+        factors.consistency = previousScore;
+      }
+    }
+    
     const score = this.calculateWeightedScore(factors);
     const reasoning = this.generateReasoning(factors, flags, score);
 
